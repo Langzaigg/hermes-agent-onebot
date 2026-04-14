@@ -2264,6 +2264,13 @@ class GatewayRunner:
                 return None
             return QQAdapter(config)
 
+        elif platform == Platform.ONEBOT:
+            from gateway.platforms.onebot import OneBotAdapter, check_onebot_requirements
+            if not check_onebot_requirements():
+                logger.warning("OneBot: websockets not installed")
+                return None
+            return OneBotAdapter(config)
+
         return None
 
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -2302,6 +2309,7 @@ class GatewayRunner:
             Platform.DINGTALK: "DINGTALK_ALLOWED_USERS",
             Platform.FEISHU: "FEISHU_ALLOWED_USERS",
             Platform.WECOM: "WECOM_ALLOWED_USERS",
+            Platform.ONEBOT: "ONEBOT_ALLOWED_USERS",
             Platform.WECOM_CALLBACK: "WECOM_CALLBACK_ALLOWED_USERS",
             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
@@ -2320,6 +2328,7 @@ class GatewayRunner:
             Platform.DINGTALK: "DINGTALK_ALLOW_ALL_USERS",
             Platform.FEISHU: "FEISHU_ALLOW_ALL_USERS",
             Platform.WECOM: "WECOM_ALLOW_ALL_USERS",
+            Platform.ONEBOT: "ONEBOT_ALLOW_ALL_USERS",
             Platform.WECOM_CALLBACK: "WECOM_CALLBACK_ALLOW_ALL_USERS",
             Platform.WEIXIN: "WEIXIN_ALLOW_ALL_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
@@ -7820,14 +7829,12 @@ class GatewayRunner:
                     _adapter = self.adapters.get(source.platform)
                     if _adapter:
                         # Platforms that don't support editing sent messages
-                        # (e.g. QQ, WeChat) should skip streaming entirely —
-                        # without edit support, the consumer sends a partial
-                        # first message that can never be updated, resulting in
-                        # duplicate messages (partial + final).
+                        # (e.g. QQ/OneBot) still benefit from the stream
+                        # consumer: paragraph mode flushes each paragraph
+                        # as a separate message instead of waiting until the
+                        # end, providing incremental output.
                         _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
-                        if not _adapter_supports_edit:
-                            raise RuntimeError("skip streaming for non-editable platform")
-                        _effective_cursor = _scfg.cursor
+                        _effective_cursor = "" if not _adapter_supports_edit else _scfg.cursor
                         # Some Matrix clients render the streaming cursor
                         # as a visible tofu/white-box artifact.  Keep
                         # streaming text on Matrix, but suppress the cursor.

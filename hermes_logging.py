@@ -25,6 +25,7 @@ Session context:
 
 import logging
 import os
+import sys
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -275,7 +276,7 @@ def setup_verbose_logging() -> None:
             if getattr(h, "_hermes_verbose", False):
                 return
 
-    handler = logging.StreamHandler()
+    handler = logging.StreamHandler(sys.stdout, encoding="utf-8")
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(RedactingFormatter(_LOG_FORMAT_VERBOSE, datefmt="%H:%M:%S"))
     handler._hermes_verbose = True  # type: ignore[attr-defined]

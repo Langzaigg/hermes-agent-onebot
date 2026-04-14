@@ -1943,6 +1943,7 @@ class BasePlatformAdapter(ABC):
         content: str,
         max_length: int = 4096,
         len_fn: Optional["Callable[[str], int]"] = None,
+        preferred_split: str = "\n",
     ) -> List[str]:
         """
         Split a long message into chunks, preserving code block boundaries.
@@ -1959,6 +1960,9 @@ class BasePlatformAdapter(ABC):
                      Defaults to ``len`` (Unicode code-points).  Pass
                      ``utf16_len`` for platforms that measure message
                      length in UTF-16 code units (e.g. Telegram).
+            preferred_split: Preferred split boundary.  Defaults to ``"\\n"``.
+                     Set to ``"\\n\\n"`` for platforms like QQ/OneBot where
+                     paragraph boundaries are more natural split points.
 
         Returns:
             List of message chunks
@@ -2005,7 +2009,11 @@ class BasePlatformAdapter(ABC):
             else:
                 _cp_limit = headroom
             region = remaining[:_cp_limit]
-            split_at = region.rfind("\n")
+            split_at = -1
+            if len(preferred_split) > 1:
+                split_at = region.rfind(preferred_split)
+            if split_at < 0:
+                split_at = region.rfind("\n")
             if split_at < _cp_limit // 2:
                 split_at = region.rfind(" ")
             if split_at < 1:

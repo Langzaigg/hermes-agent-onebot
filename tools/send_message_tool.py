@@ -163,6 +163,7 @@ def _handle_send(args):
         "weixin": Platform.WEIXIN,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
+        "onebot": Platform.ONEBOT,
     }
     platform = platform_map.get(platform_name)
     if not platform:
@@ -353,13 +354,22 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if _feishu_available:
         _MAX_LENGTHS[Platform.FEISHU] = FeishuAdapter.MAX_MESSAGE_LENGTH
 
+    # OneBot (QQ) — import adapter lazily
+    try:
+        from gateway.platforms.onebot import OneBotAdapter
+        _MAX_LENGTHS[Platform.ONEBOT] = OneBotAdapter.MAX_MESSAGE_LENGTH
+        _onebot_available = True
+    except ImportError:
+        _onebot_available = False
+
     # Smart-chunk the message to fit within platform limits.
     # For short messages or platforms without a known limit this is a no-op.
     # Telegram measures length in UTF-16 code units, not Unicode codepoints.
     max_len = _MAX_LENGTHS.get(platform)
     if max_len:
         _len_fn = utf16_len if platform == Platform.TELEGRAM else None
-        chunks = BasePlatformAdapter.truncate_message(message, max_len, len_fn=_len_fn)
+        _preferred_split = OneBotAdapter.PREFERRED_SPLIT if platform == Platform.ONEBOT and _onebot_available else "\n"
+        chunks = BasePlatformAdapter.truncate_message(message, max_len, len_fn=_len_fn, preferred_split=_preferred_split)
     else:
         chunks = [message]
 
@@ -425,6 +435,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.WECOM:
             result = await _send_wecom(pconfig.extra, chat_id, chunk)
+        elif platform == Platform.ONEBOT:
+            result = await _send_onebot(pconfig.extra, chat_id, chunk)
         elif platform == Platform.BLUEBUBBLES:
             result = await _send_bluebubbles(pconfig.extra, chat_id, chunk)
         elif platform == Platform.QQBOT:
@@ -921,6 +933,35 @@ async def _send_wecom(extra, chat_id, message):
             await adapter.disconnect()
     except Exception as e:
         return _error(f"WeCom send failed: {e}")
+
+
+async def _send_onebot(extra, chat_id, message):
+    """Send via OneBot v11 (QQ/NapCat) WebSocket API."""
+    try:
+        from gateway.platforms.onebot import OneBotAdapter, check_onebot_requirements
+        if not check_onebot_requirements():
+            return {"error": "OneBot requirements not met. Need websockets."}
+    except ImportError:
+        return {"error": "OneBot adapter not available."}
+    try:
+        message = OneBotAdapter.clean_message(message)
+        if not message:
+            return {"success": True, "platform": "onebot", "chat_id": chat_id}
+        from gateway.config import PlatformConfig
+        pconfig = PlatformConfig(extra=extra)
+        adapter = OneBotAdapter(pconfig)
+        connected = await adapter.connect()
+        if not connected:
+            return {"error": f"OneBot: failed to connect"}
+        try:
+            result = await adapter.send(chat_id, message)
+            if not result.success:
+                return {"error": f"OneBot send failed: {result.error}"}
+            return {"success": True, "platform": "onebot", "chat_id": chat_id, "message_id": result.message_id}
+        finally:
+            await adapter.disconnect()
+    except Exception as e:
+        return {"error": f"OneBot send failed: {e}"}
 
 
 async def _send_weixin(pconfig, chat_id, message, media_files=None):

@@ -259,6 +259,10 @@ class GatewayStreamConsumer:
         # Platform message length limit — leave room for cursor + formatting
         _raw_limit = getattr(self.adapter, "MAX_MESSAGE_LENGTH", 4096)
         _safe_limit = max(500, _raw_limit - len(self.cfg.cursor) - 100)
+        # Paragraph mode: for platforms that don't support editing (e.g. OneBot/QQ),
+        # flush each paragraph as a separate message when PREFERRED_SPLIT is detected.
+        _paragraph_mode = not getattr(self.adapter, "SUPPORTS_MESSAGE_EDITING", True)
+        _preferred = getattr(self.adapter, "PREFERRED_SPLIT", "\n\n")
 
         try:
             while True:
@@ -287,6 +291,52 @@ class GatewayStreamConsumer:
                 # tag is not lost.
                 if got_done:
                     self._flush_think_buffer()
+
+                # --- Paragraph mode: flush completed paragraphs ---
+                # For platforms that don't support message editing (e.g. OneBot/QQ),
+                # detect paragraph boundaries in accumulated text and send each
+                # completed paragraph as a separate message immediately.
+                if _paragraph_mode and self._accumulated and not got_done:
+                    while _preferred in self._accumulated:
+                        split_at = self._accumulated.index(_preferred)
+                        para = self._accumulated[:split_at]
+                        self._accumulated = self._accumulated[split_at + len(_preferred):].lstrip("\n")
+                        para = self._clean_for_display(para)
+                        if para.strip():
+                            await self._send_new_chunk(para, None)
+                            self._already_sent = True
+                            self._last_edit_time = time.monotonic()
+                            await asyncio.sleep(0.3)  # Rate-limit between paragraphs
+
+                # Paragraph mode: handle control flow (done, commentary, segment
+                # break) and skip the edit-based logic entirely.
+                if _paragraph_mode:
+                    if got_done:
+                        # Flush remaining text as the final paragraph.
+                        if self._accumulated:
+                            final = self._clean_for_display(self._accumulated)
+                            if final.strip():
+                                await self._send_new_chunk(final, None)
+                                self._already_sent = True
+                        self._final_response_sent = self._already_sent
+                        return
+                    if commentary_text is not None:
+                        self._reset_segment_state()
+                        await self._send_commentary(commentary_text)
+                        self._last_edit_time = time.monotonic()
+                        self._reset_segment_state()
+                    if got_segment_break:
+                        # Flush remaining text before the tool boundary.
+                        if self._accumulated:
+                            final = self._clean_for_display(self._accumulated)
+                            if final.strip():
+                                await self._send_new_chunk(final, None)
+                                self._already_sent = True
+                        self._accumulated = ""
+                        self._message_id = None
+                        self._last_sent_text = ""
+                    await asyncio.sleep(0.05)
+                    continue
 
                 # Decide whether to flush an edit
                 now = time.monotonic()
@@ -332,12 +382,17 @@ class GatewayStreamConsumer:
 
                     # Existing message: edit it with the first chunk, then
                     # start a new message for the overflow remainder.
+                    _overflow_preferred = getattr(self.adapter, "PREFERRED_SPLIT", "\n")
                     while (
                         len(self._accumulated) > _safe_limit
                         and self._message_id is not None
                         and self._edit_supported
                     ):
-                        split_at = self._accumulated.rfind("\n", 0, _safe_limit)
+                        split_at = -1
+                        if len(_overflow_preferred) > 1:
+                            split_at = self._accumulated.rfind(_overflow_preferred, 0, _safe_limit)
+                        if split_at < 0:
+                            split_at = self._accumulated.rfind("\n", 0, _safe_limit)
                         if split_at < _safe_limit // 2:
                             split_at = _safe_limit
                         chunk = self._accumulated[:split_at]
@@ -487,14 +542,26 @@ class GatewayStreamConsumer:
         return final_text
 
     @staticmethod
-    def _split_text_chunks(text: str, limit: int) -> list[str]:
-        """Split text into reasonably sized chunks for fallback sends."""
+    def _split_text_chunks(text: str, limit: int, preferred_split: str = "\n") -> list[str]:
+        """Split text into reasonably sized chunks for fallback sends.
+
+        When *preferred_split* is longer than one character (e.g. ``"\\n\\n"``
+        for paragraph-aware platforms like QQ/OneBot), the method first tries
+        to split at the preferred boundary, falling back to single newlines
+        and then hard truncation.
+        """
         if len(text) <= limit:
             return [text]
         chunks: list[str] = []
         remaining = text
         while len(remaining) > limit:
-            split_at = remaining.rfind("\n", 0, limit)
+            split_at = -1
+            # Try preferred split first (e.g. "\n\n" for paragraph boundaries)
+            if len(preferred_split) > 1:
+                split_at = remaining.rfind(preferred_split, 0, limit)
+            # Fall back to single newline if preferred split not found
+            if split_at < 0:
+                split_at = remaining.rfind("\n", 0, limit)
             if split_at < limit // 2:
                 split_at = limit
             chunks.append(remaining[:split_at])
@@ -519,7 +586,8 @@ class GatewayStreamConsumer:
 
         raw_limit = getattr(self.adapter, "MAX_MESSAGE_LENGTH", 4096)
         safe_limit = max(500, raw_limit - 100)
-        chunks = self._split_text_chunks(continuation, safe_limit)
+        preferred = getattr(self.adapter, "PREFERRED_SPLIT", "\n")
+        chunks = self._split_text_chunks(continuation, safe_limit, preferred_split=preferred)
 
         last_message_id: Optional[str] = None
         last_successful_chunk = ""

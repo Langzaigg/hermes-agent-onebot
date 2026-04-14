@@ -382,6 +382,15 @@ PLATFORM_HINTS = {
         "your response. Images are sent as native photos, and other files arrive as downloadable "
         "documents."
     ),
+    "onebot": (
+        "You are in a QQ chat (via OneBot/NapCat). "
+        "Please do not use markdown as QQ does not render it. "
+        "You can send media files natively: include MEDIA:/absolute/path/to/file "
+        "in your response. Images (.png, .jpg, .webp) appear as photos, "
+        "audio as voice messages, videos (.mp4) play inline, and other files "
+        "arrive as downloadable documents. "
+        "In group chats, keep responses concise and natural."
+    ),
 }
 
 # ---------------------------------------------------------------------------

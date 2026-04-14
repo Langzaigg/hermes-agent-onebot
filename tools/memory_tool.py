@@ -23,7 +23,6 @@ Design:
 - Frozen snapshot pattern: system prompt is stable, tool responses show live state
 """
 
-import fcntl
 import json
 import logging
 import os
@@ -33,6 +32,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
+
+# Platform-specific file locking
+if os.name == 'nt':  # Windows
+    import msvcrt
+else:  # Unix/Linux
+    import fcntl
 
 logger = logging.getLogger(__name__)
 
@@ -141,10 +146,23 @@ class MemoryStore:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = open(lock_path, "w")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if os.name == 'nt':  # Windows
+                # Lock the entire file (0x7FFFFFFF = max 32-bit int)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            else:  # Unix/Linux
+                fcntl.flock(fd, fcntl.LOCK_EX)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if os.name == 'nt':  # Windows
+                try:
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            else:  # Unix/Linux
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
             fd.close()
 
     @staticmethod

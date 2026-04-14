@@ -137,6 +137,83 @@ See `hermes claw migrate --help` for all options, or use the `openclaw-migration
 
 ---
 
+## OneBot / QQ Integration
+
+This fork adds a **OneBot v11** adapter, enabling Hermes to run as a QQ bot via [NapCat](https://github.com/NapNeko/NapCatQQ), [LLOneBot](https://github.com/LagrangeDev/Lagrange.Core), [Lagrange](https://github.com/LagrangeDev/Lagrange.Core), or any other OneBot v11-compatible implementation.
+
+### Features
+
+- **WebSocket connection** to OneBot v11 implementations (reverse/proxy WS)
+- **Paragraph-mode streaming** — long responses are automatically split into separate QQ messages at `\n\n` boundaries, sent incrementally instead of waiting for the full response
+- **Private & group chat** — configurable group trigger mode (at-only or all messages)
+- **Group session modes** — per-user or per-group conversation isolation
+- **Message debounce** — prevents rapid-fire duplicate sends
+- **NO_PROXY handling** — automatically excludes the OneBot WebSocket host from HTTP proxy
+
+### Environment Variables
+
+Add these to `~/.hermes/.env`:
+
+```env
+# OneBot WebSocket URL (required)
+ONEBOT_WS_URL=ws://127.0.0.1:3001
+
+# Access token if your OneBot implementation requires authentication
+ONEBOT_ACCESS_TOKEN=
+
+# Bot QQ number (optional, used for self-message filtering)
+ONEBOT_BOT_ID=
+
+# Enable private chat (default: true)
+ONEBOT_PRIVATE_CHAT=true
+
+# Only respond to @bot in groups (default: true)
+ONEBOT_GROUP_AT_ONLY=true
+
+# Group session mode: "user" (per-user) or "group" (per-group) (default: user)
+ONEBOT_GROUP_SESSION_MODE=user
+
+# Message debounce interval in milliseconds (default: 2000)
+ONEBOT_DEBOUNCE_MS=2000
+```
+
+Then set the platform in `~/.hermes/config.yaml`:
+
+```yaml
+gateway:
+  platforms:
+    onebot:
+      enabled: true
+```
+
+### Quick Start with NapCat
+
+1. Install and configure [NapCatQQ](https://github.com/NapNeko/NapCatQQ) with your QQ account
+2. Enable the OneBot v11 HTTP/WebSocket plugin in NapCat settings
+3. Set `ONEBOT_WS_URL` in `~/.hermes/.env` to NapCat's WebSocket address
+4. Enable the OneBot platform: `hermes config set gateway.platforms.onebot.enabled true`
+5. Start the gateway: `hermes gateway`
+
+---
+
+## Windows Compatibility
+
+This fork includes fixes for running Hermes on **native Windows** (PowerShell / CMD), which is not supported upstream.
+
+### Changes
+
+| Area | Fix |
+|------|-----|
+| **Logging** | `StreamHandler` uses `encoding="utf-8"` to prevent `UnicodeEncodeError` on GBK consoles |
+| **File I/O** | All `read_text()` / `write_text()` calls explicitly specify `encoding="utf-8"` |
+| **Skills Hub** | Cache files, lock files, and GitHub App key reads use UTF-8 encoding |
+| **Process check** | `os.kill(pid, 0)` catches `OSError` (Windows Error 87) in addition to `ProcessLookupError` |
+| **OneBot** | Native OneBot v11 adapter for QQ integration |
+
+> **Note:** Upstream recommends WSL2 for Windows users. These fixes allow native Windows usage but some edge cases may remain.
+
+---
+
 ## Contributing
 
 We welcome contributions! See the [Contributing Guide](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) for development setup, code style, and PR process.

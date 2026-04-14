@@ -67,6 +67,7 @@ class Platform(Enum):
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
+    ONEBOT = "onebot"
 
 
 @dataclass
@@ -1143,6 +1144,30 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 chat_id=qq_home,
                 name=os.getenv("QQ_HOME_CHANNEL_NAME", "Home"),
             )
+
+    # OneBot (QQ / NapCat)
+    onebot_ws_url = os.getenv("ONEBOT_WS_URL")
+    if onebot_ws_url:
+        if Platform.ONEBOT not in config.platforms:
+            config.platforms[Platform.ONEBOT] = PlatformConfig()
+        config.platforms[Platform.ONEBOT].enabled = True
+        config.platforms[Platform.ONEBOT].extra["ws_url"] = onebot_ws_url
+
+    onebot_access_token = os.getenv("ONEBOT_ACCESS_TOKEN", "")
+    if onebot_access_token and Platform.ONEBOT in config.platforms:
+        config.platforms[Platform.ONEBOT].extra["access_token"] = onebot_access_token
+
+    onebot_bot_id = os.getenv("ONEBOT_BOT_ID", "")
+    if onebot_bot_id and Platform.ONEBOT in config.platforms:
+        config.platforms[Platform.ONEBOT].extra["bot_id"] = onebot_bot_id
+
+    onebot_home = os.getenv("ONEBOT_HOME_CHANNEL")
+    if onebot_home and Platform.ONEBOT in config.platforms:
+        config.platforms[Platform.ONEBOT].home_channel = HomeChannel(
+            platform=Platform.ONEBOT,
+            chat_id=onebot_home,
+            name=os.getenv("ONEBOT_HOME_CHANNEL_NAME", "Home"),
+        )
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

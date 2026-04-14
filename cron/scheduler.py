@@ -254,6 +254,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         "weixin": Platform.WEIXIN,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
+        "onebot": Platform.ONEBOT,
         "bluebubbles": Platform.BLUEBUBBLES,
         "qqbot": Platform.QQBOT,
     }
