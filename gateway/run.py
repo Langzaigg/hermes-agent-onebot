@@ -5182,8 +5182,24 @@ class GatewayRunner:
 
         try:
             media_files, _ = adapter.extract_media(response)
-            _, cleaned = adapter.extract_images(response)
+            images, cleaned = adapter.extract_images(response)
             local_files, _ = adapter.extract_local_files(cleaned)
+
+            # Also extract "Image: <path>" lines that some tools/LLMs produce.
+            # These look like ``Image: /path/to/file.png`` and are a common
+            # alternative to the ``MEDIA:`` tag format.
+            import re as _re
+            _IMAGE_PATH_RE = _re.compile(r'^Image:\s*(\S+)\s*$', _re.MULTILINE)
+            _image_paths: list[str] = []
+            # Path mapping: Linux absolute paths → Windows accessible path
+            for m in _IMAGE_PATH_RE.finditer(response):
+                raw = m.group(1).strip()
+                p = os.path.expanduser(raw)
+                # Map Linux absolute paths to Windows on NT systems
+                if os.name == "nt" and len(p) >= 2 and p[0] == "/" and p[1] != "/":
+                    p = "Y:" + p.replace("/", os.sep)
+                if os.path.isfile(p):
+                    _image_paths.append(p)
 
             _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
 
@@ -5238,6 +5254,31 @@ class GatewayRunner:
                         )
                 except Exception as e:
                     logger.warning("[%s] Post-stream file delivery failed: %s", adapter.name, e)
+
+            # Deliver "Image: <path>" lines extracted from agent response
+            for img_path in _image_paths:
+                try:
+                    ext = Path(img_path).suffix.lower()
+                    if ext in _IMAGE_EXTS:
+                        await adapter.send_image_file(
+                            chat_id=event.source.chat_id,
+                            image_path=img_path,
+                            metadata=_thread_meta,
+                        )
+                except Exception as e:
+                    logger.warning("[%s] Post-stream Image: delivery failed: %s", adapter.name, e)
+
+            # Deliver extracted image URLs (e.g. ![alt](url) in agent response)
+            for image_url, alt_text in (images or []):
+                try:
+                    await adapter.send_image(
+                        chat_id=event.source.chat_id,
+                        image_url=image_url,
+                        caption=alt_text,
+                        metadata=_thread_meta,
+                    )
+                except Exception as e:
+                    logger.warning("[%s] Post-stream image delivery failed: %s", adapter.name, e)
 
         except Exception as e:
             logger.warning("Post-stream media extraction failed: %s", e)

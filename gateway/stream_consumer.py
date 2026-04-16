@@ -263,6 +263,8 @@ class GatewayStreamConsumer:
         # flush each paragraph as a separate message when PREFERRED_SPLIT is detected.
         _paragraph_mode = not getattr(self.adapter, "SUPPORTS_MESSAGE_EDITING", True)
         _preferred = getattr(self.adapter, "PREFERRED_SPLIT", "\n\n")
+        _paragraph_count = 0
+        _paragraph_limit = int(getattr(self.adapter, "PARAGRAPH_MERGE_LIMIT", 5))
 
         try:
             while True:
@@ -296,25 +298,47 @@ class GatewayStreamConsumer:
                 # For platforms that don't support message editing (e.g. OneBot/QQ),
                 # detect paragraph boundaries in accumulated text and send each
                 # completed paragraph as a separate message immediately.
+                # After _paragraph_limit paragraphs, merge the remainder into
+                # one message (replacing \n\n with \n) to avoid spam.
                 if _paragraph_mode and self._accumulated and not got_done:
-                    while _preferred in self._accumulated:
-                        split_at = self._accumulated.index(_preferred)
-                        para = self._accumulated[:split_at]
-                        self._accumulated = self._accumulated[split_at + len(_preferred):].lstrip("\n")
-                        para = self._clean_for_display(para)
-                        if para.strip():
-                            await self._send_new_chunk(para, None)
-                            self._already_sent = True
-                            self._last_edit_time = time.monotonic()
-                            await asyncio.sleep(0.3)  # Rate-limit between paragraphs
+                    if _paragraph_count >= _paragraph_limit:
+                        # Past the limit — collapse new paragraph separators
+                        # to single newlines so remaining content merges
+                        # into one final message.
+                        self._accumulated = self._accumulated.replace(
+                            _preferred, "\n", 1
+                        )
+                    else:
+                        while _preferred in self._accumulated:
+                            split_at = self._accumulated.index(_preferred)
+                            para = self._accumulated[:split_at]
+                            self._accumulated = self._accumulated[
+                                split_at + len(_preferred):
+                            ].lstrip("\n")
+                            para = self._clean_for_display(para)
+                            if para.strip():
+                                _paragraph_count += 1
+                                if _paragraph_count >= _paragraph_limit:
+                                    # Keep current paragraph in buffer; it
+                                    # will be sent as part of the merged tail.
+                                    self._accumulated = (
+                                        para + "\n" + self._accumulated
+                                    )
+                                    break
+                                await self._send_new_chunk(para, None)
+                                self._already_sent = True
+                                self._last_edit_time = time.monotonic()
+                                await asyncio.sleep(0.3)
 
                 # Paragraph mode: handle control flow (done, commentary, segment
                 # break) and skip the edit-based logic entirely.
                 if _paragraph_mode:
                     if got_done:
-                        # Flush remaining text as the final paragraph.
+                        # Flush remaining text as the final message.
                         if self._accumulated:
                             final = self._clean_for_display(self._accumulated)
+                            if _paragraph_count >= _paragraph_limit:
+                                final = final.replace("\n\n", "\n")
                             if final.strip():
                                 await self._send_new_chunk(final, None)
                                 self._already_sent = True
@@ -329,6 +353,8 @@ class GatewayStreamConsumer:
                         # Flush remaining text before the tool boundary.
                         if self._accumulated:
                             final = self._clean_for_display(self._accumulated)
+                            if _paragraph_count >= _paragraph_limit:
+                                final = final.replace("\n\n", "\n")
                             if final.strip():
                                 await self._send_new_chunk(final, None)
                                 self._already_sent = True
@@ -479,21 +505,31 @@ class GatewayStreamConsumer:
     # gateway/platforms/base.py for post-processing.
     _MEDIA_RE = re.compile(r'''[`"']?MEDIA:\s*\S+[`"']?''')
 
+    # Pattern to strip "Image: <path>" lines that some tools/LLMs produce.
+    _IMAGE_PATH_RE = re.compile(r'^Image:\s*(?:~/|/)\S+\s*$', re.MULTILINE)
+
     @staticmethod
     def _clean_for_display(text: str) -> str:
-        """Strip MEDIA: directives and internal markers from text before display.
+        """Strip MEDIA: directives, Image: path lines, and internal markers
+        from text before display.
 
         The streaming path delivers raw text chunks that may include
-        ``MEDIA:<path>`` tags and ``[[audio_as_voice]]`` directives meant for
-        the platform adapter's post-processing.  The actual media files are
-        delivered separately via ``_deliver_media_from_response()`` after the
-        stream finishes — we just need to hide the raw directives from the
-        user.
+        ``MEDIA:<path>`` tags, ``Image: <path>`` lines and ``[[audio_as_voice]]``
+        directives meant for the platform adapter's post-processing.  The actual
+        media files are delivered separately via ``_deliver_media_from_response()``
+        after the stream finishes — we just need to hide the raw directives from
+        the user.
         """
-        if "MEDIA:" not in text and "[[audio_as_voice]]" not in text:
+        needs_clean = (
+            "MEDIA:" in text
+            or "[[audio_as_voice]]" in text
+            or "Image:" in text
+        )
+        if not needs_clean:
             return text
         cleaned = text.replace("[[audio_as_voice]]", "")
         cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
+        cleaned = GatewayStreamConsumer._IMAGE_PATH_RE.sub("", cleaned)
         # Collapse excessive blank lines left behind by removed tags
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         # Strip trailing whitespace/newlines but preserve leading content

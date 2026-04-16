@@ -46,9 +46,11 @@ Usage:
 import argparse
 import os
 import subprocess
-import sys
+import sys, io
 from pathlib import Path
 from typing import Optional
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 def _require_tty(command_name: str) -> None:
     """Exit with a clear error if stdin is not a terminal.

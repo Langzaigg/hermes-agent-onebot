@@ -109,6 +109,10 @@ class OneBotAdapter(BasePlatformAdapter):
         self._listen_task: Optional[asyncio.Task] = None
         self._should_reconnect = True
 
+        # In-memory cache of recent group messages: {group_id: [(sender, text), ...]}
+        # Kept at most 10 per group; used to provide context when bot is @mentioned.
+        self._recent_group_messages: Dict[str, list] = {}
+
         # WebSocket API call infrastructure (request/response over WS)
         self._ws_api_lock = asyncio.Lock()
         self._ws_api_futures: Dict[str, asyncio.Future] = {}
@@ -292,16 +296,58 @@ class OneBotAdapter(BasePlatformAdapter):
             return
 
         if message_type == "group":
+            # Cache every group message for context BEFORE @-filter,
+            # so that non-@ messages are also available as context.
+            if group_id:
+                _ctx_image_urls: list[str] = []
+                for seg in (raw_message if isinstance(raw_message, list) else []):
+                    if seg.get("type") == "image":
+                        url = seg.get("data", {}).get("url", "")
+                        if url:
+                            _ctx_image_urls.append(url)
+                # Quick text extraction for cache (full extraction below)
+                _cache_text = ""
+                if isinstance(raw_message, list):
+                    _cache_text = " ".join(
+                        s.get("data", {}).get("text", "").strip()
+                        for s in raw_message
+                        if s.get("type") == "text" and s.get("data", {}).get("text", "").strip()
+                    )
+                elif isinstance(raw_message, str):
+                    _cache_text = raw_message.strip()
+                self._cache_group_message(
+                    group_id, nickname, _cache_text, image_urls=_ctx_image_urls,
+                )
+
             if self._group_at_only:
                 # Check if bot is @mentioned
                 if not self._is_bot_mentioned(raw_message):
                     return
 
+        # Extract message text
+        text, media_urls, media_types = await self._extract_message(raw_message, event)
+
+        # Fetch recent messages for context when bot is @mentioned in group.
+        # This gives the agent visibility into the messages that preceded
+        # the @mention, regardless of who sent them.
+        _recent_context = None
+        _recent_image_urls: list[str] = []
+        if message_type == "group" and self._is_bot_mentioned(raw_message):
+            _recent_context, _recent_image_urls = self._get_cached_group_context(group_id)
+
         # Build session key
         session_key = self._build_session_key(message_type, user_id, group_id)
 
-        # Extract message content
-        text, media_urls, media_types = await self._extract_message(raw_message, event)
+        # Append recent chat context after the user's message
+        if _recent_context:
+            text = text + "\n" + _recent_context
+
+        # Append context image URLs to current message's media
+        if _recent_image_urls:
+            media_urls = list(media_urls) + _recent_image_urls
+            media_types = list(media_types) + ["image"] * len(_recent_image_urls)
+            if not media_urls:
+                msg_type = MessageType.PHOTO
 
         # Handle reply context
         reply_to_id = None
@@ -608,20 +654,96 @@ class OneBotAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send an image via OneBot HTTP API using CQ code."""
+        """Send an image via OneBot WebSocket API.
+
+        Supports both CQ code and array-style message segments.
+        """
         try:
             params = self._parse_chat_id(chat_id)
-            segments = [f"[CQ:image,file={image_url}]"]
+            # Build message segments: image + optional caption
+            segments = [
+                {"type": "image", "data": {"file": image_url}},
+            ]
             if caption:
-                segments.insert(0, caption)
-            message = "\n".join(segments)
-            params["message"] = message
+                segments.insert(0, {"type": "text", "data": {"text": caption}})
+            params["message"] = segments
 
-            await self._api_call(
-                "send_msg",
+            result = await self._api_call(
+                "send_group_msg" if params.get("group_id") else "send_msg",
                 params,
             )
-            return SendResult(success=True)
+
+            # Fallback: use send_msg with message_type
+            if not result or result.get("retcode", -1) != 0:
+                result = await self._api_call("send_msg", {
+                    "message_type": params.get("message_type", "private"),
+                    "user_id": params.get("user_id"),
+                    "group_id": params.get("group_id"),
+                    "message": segments,
+                })
+
+            msg_id = result.get("data", {}).get("message_id") if result else None
+            return SendResult(
+                success=True,
+                message_id=str(msg_id) if msg_id else None,
+                raw_response=result,
+            )
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local image file via OneBot WebSocket API.
+
+        Supports both local paths (``/path/to/file.png``) and file:// URIs.
+        On Windows, Linux paths (``/home/...``) are automatically mapped
+        to the configured Windows drive (default ``Y:\\home\\...``).
+        """
+        try:
+            from pathlib import Path
+            raw = os.path.expanduser(image_path)
+            # Map Linux absolute paths to Windows on NT systems.
+            # /home/... → Y:\home\...
+            # /tmp/...  → Y:\tmp\...
+            # /opt/...  → Y:\opt\...
+            # Any other /<dir>/... → Y:\<dir>\...
+            if os.name == "nt" and len(raw) >= 2 and raw[0] == "/" and raw[1] != "/":
+                raw = "Y:" + raw.replace("/", os.sep)
+            path = Path(raw).resolve()
+            if not path.is_file():
+                logger.warning("[OneBot] send_image_file: file not found: %s", path)
+                return SendResult(success=False, error=f"File not found: {path}")
+
+            params = self._parse_chat_id(chat_id)
+            segments: list = []
+            if caption:
+                segments.append({"type": "text", "data": {"text": caption}})
+            segments.append({"type": "image", "data": {"file": str(path)}})
+            params["message"] = segments
+
+            result = await self._api_call(
+                "send_group_msg" if params.get("group_id") else "send_msg",
+                params,
+            )
+            if not result or result.get("retcode", -1) != 0:
+                result = await self._api_call("send_msg", {
+                    "message_type": params.get("message_type", "private"),
+                    "user_id": params.get("user_id"),
+                    "group_id": params.get("group_id"),
+                    "message": segments,
+                })
+            msg_id = result.get("data", {}).get("message_id") if result else None
+            return SendResult(
+                success=True,
+                message_id=str(msg_id) if msg_id else None,
+                raw_response=result,
+            )
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
@@ -811,6 +933,63 @@ class OneBotAdapter(BasePlatformAdapter):
                     if str(qq) == str(self._bot_id):
                         return True
         return False
+
+    def _cache_group_message(
+        self,
+        group_id: Any,
+        sender: str,
+        text: str,
+        image_urls: Optional[list[str]] = None,
+    ) -> None:
+        """Append a group message to the in-memory recent-messages cache.
+
+        Keeps at most 10 entries per group (FIFO).  Both text and image
+        URLs are stored so that context can include visual content.
+        """
+        if not text and not image_urls:
+            return
+        key = str(group_id)
+        buf = self._recent_group_messages.setdefault(key, [])
+        buf.append({
+            "sender": sender,
+            "text": (text or "")[:500],
+            "images": list(image_urls or [])[:4],
+        })
+        # Keep only the last 10 messages
+        if len(buf) > 10:
+            del buf[: len(buf) - 10]
+
+    def _get_cached_group_context(
+        self, group_id: Any,
+    ) -> tuple[Optional[str], list[str]]:
+        """Return recent cached messages and their image URLs.
+
+        Returns ``(text_block, image_urls)`` where *text_block* is a
+        formatted string of up to 4 messages before the current one, and
+        *image_urls* collects any images found in those messages.
+        """
+        buf = self._recent_group_messages.get(str(group_id))
+        if not buf or len(buf) < 1:
+            return None, []
+        # Take up to 4 messages just before the current one
+        recent = buf[-5:-1] if len(buf) >= 5 else buf[:-1]
+        if not recent:
+            return None, []
+        context_lines: list[str] = []
+        all_images: list[str] = []
+        for entry in recent:
+            sender = entry["sender"]
+            text = entry["text"]
+            imgs = entry["images"]
+            label = f"{sender}: {text}" if text else f"{sender}: [image]"
+            context_lines.append(label)
+            all_images.extend(imgs)
+        return (
+            "<recent_context>\n"
+            + "\n".join(context_lines)
+            + "\n</recent_context>",
+            all_images,
+        )
 
     @staticmethod
     def _redact_url(url: str) -> str:
